@@ -118,10 +118,14 @@ _API_SESSION.headers.update(
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
+        "Host": "stats.wnba.com",
         "Origin": "https://www.wnba.com",
         "Referer": "https://www.wnba.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
@@ -134,7 +138,7 @@ _API_SESSION.headers.update(
 def _api_get(url: str, params: dict | None = None, retries: int = 4) -> dict | None:
     for attempt in range(retries):
         try:
-            r = _API_SESSION.get(url, params=params, timeout=30)
+            r = _API_SESSION.get(url, params=params, timeout=60)
             if r.status_code == 200:
                 return r.json()
             print(f"  [API WARN] HTTP {r.status_code} → {url}", file=sys.stderr)
@@ -294,13 +298,20 @@ def api_process_game(game: dict) -> list[dict]:
 
 def _get_playwright_browser(pw):
     """Return a Playwright browser instance, trying several strategies."""
-    launch_kwargs = {"headless": True}
+    launch_kwargs = {
+        "headless": True,
+        "args": [
+            "--disable-http2",          # fixes ERR_HTTP2_PROTOCOL_ERROR on wnba.com
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    }
 
-    # 1. Use pre-installed binary if it exists
+    # Use pre-installed binary if it exists (sandbox env); otherwise let
+    # Playwright find/use its own installed Chromium.
     if os.path.exists(CHROMIUM_PATH):
         launch_kwargs["executable_path"] = CHROMIUM_PATH
 
-    # 2. Try launching (may auto-download if needed)
     return pw.chromium.launch(**launch_kwargs)
 
 
@@ -348,8 +359,9 @@ def browser_fetch_schedule(pw) -> list[dict]:
         context = browser.new_context()
         page = context.new_page()
         page.on("response", on_response)
-        page.goto(SCHEDULE_PAGE, wait_until="networkidle", timeout=60_000)
-        time.sleep(2)
+        page.goto(SCHEDULE_PAGE, wait_until="load", timeout=60_000)
+        # Give JS time to fire the schedule API call and render games
+        time.sleep(5)
         games = intercepted if intercepted else _scrape_schedule_links(page)
     finally:
         browser.close()
