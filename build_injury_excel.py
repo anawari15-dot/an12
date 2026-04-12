@@ -87,9 +87,13 @@ ESPN_SUMMARY = (
     "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/"
     "summary?event={event_id}"
 )
-ESPN_ATHLETE = (
+ESPN_ATHLETE_CORE = (
+    "https://sports.core.api.espn.com/v2/sports/basketball/leagues/wnba/"
+    "athletes/{athlete_id}?lang=en&region=us"
+)
+ESPN_ROSTER = (
     "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/"
-    "athletes/{athlete_id}"
+    "teams/{team_id}/roster"
 )
 
 # Season date range (inclusive)
@@ -408,46 +412,66 @@ def fetch_game_logs(
 # Player age fetching
 # ---------------------------------------------------------------------------
 
-_dob_cache: dict = {}
+_dob_cache: dict = {}   # player_id -> date | None
+_age_fail_count: int = 0
+
+
+def _parse_dob(data: dict) -> "date | None":
+    """Extract date-of-birth from an ESPN athlete response dict."""
+    for key in ("dateOfBirth", "birthDate"):
+        raw = data.get(key, "")
+        if raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+            except ValueError:
+                pass
+    return None
+
+
+def prefetch_player_dobs(team_ids: list[str], cache_dir: Path) -> None:
+    """
+    Bulk-populate _dob_cache from team roster endpoints.
+    One request per team (12 total) instead of one per player.
+    """
+    global _dob_cache
+    for tid in team_ids:
+        url = ESPN_ROSTER.format(team_id=tid)
+        try:
+            data = fetch_json(url, cache_dir)
+        except Exception:
+            continue
+        for athlete in data.get("athletes", []):
+            pid = str(athlete.get("id", ""))
+            if pid and pid not in _dob_cache:
+                dob = _parse_dob(athlete)
+                _dob_cache[pid] = dob
+    print(f"  [INFO] Roster prefetch populated DOB for {sum(1 for v in _dob_cache.values() if v)} players.")
 
 
 def get_player_age_at_date(
     player_id: str,
     target_date: date,
     cache_dir: Path,
-) -> float | None:
-    """Return player's age (fractional years) at target_date."""
-    global _dob_cache
+) -> int | None:
+    """Return player's integer age at target_date, or None if unavailable."""
+    global _dob_cache, _age_fail_count
     if player_id not in _dob_cache:
-        url = ESPN_ATHLETE.format(athlete_id=player_id)
+        # Try ESPN core API (quieter failure — only count, don't spam)
+        url = ESPN_ATHLETE_CORE.format(athlete_id=player_id)
         try:
             data = fetch_json(url, cache_dir)
-        except Exception as exc:
-            print(f"  [WARN] athlete fetch failed for {player_id}: {exc}")
-            _dob_cache[player_id] = None
-            return None
-
-        # Navigate ESPN athlete structure
-        athlete = data.get("athlete", data)  # some responses nest under "athlete"
-        dob_str = athlete.get("dateOfBirth", "")
-        if not dob_str:
-            # Try nested structure
-            dob_str = data.get("dateOfBirth", "")
-        if dob_str:
-            try:
-                dob = datetime.fromisoformat(dob_str.replace("Z", "+00:00")).date()
-                _dob_cache[player_id] = dob
-            except ValueError:
-                _dob_cache[player_id] = None
-        else:
-            _dob_cache[player_id] = None
+            dob = _parse_dob(data)
+        except Exception:
+            dob = None
+        if dob is None:
+            _age_fail_count += 1
+        _dob_cache[player_id] = dob
 
     dob = _dob_cache.get(player_id)
     if dob is None:
         return None
-
     age_days = (target_date - dob).days
-    return round(age_days / 365.25, 2)
+    return int(age_days // 365.25)
 
 
 # ---------------------------------------------------------------------------
