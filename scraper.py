@@ -63,39 +63,49 @@ _SESSION.headers.update(
 )
 
 # ---------------------------------------------------------------------------
-# DND / injury filter
+# DND / injury filter  –  conservative: require explicit injury keyword
 # ---------------------------------------------------------------------------
-_INJURY_KW = frozenset(
-    {
-        "dnd", "did not dress",
-        "injury", "injured", "illness", "ill", "sick",
-        "knee", "ankle", "foot", "hip", "shoulder", "back",
-        "wrist", "hand", "finger", "hamstring", "quad", "quadriceps",
-        "calf", "achilles", "concussion", "head", "neck", "groin",
-        "shin", "elbow", "toe", "thigh", "rib", "abdomen", "abdominal",
-        "conditioning", "rest", "soreness", "sore",
-        "strain", "sprain", "fracture", "surgery", "recovery",
-        "personal", "non-covid illness", "covid", "health and safety",
-        "league excused",
-    }
-)
-_NON_INJURY_KW = frozenset(
-    {"coach's decision", "coaches decision", "coach decision",
-     "dnp - cd", "dnp-cd", "suspended", "trade", "waived", "g league"}
-)
+_INJURY_KW = frozenset({
+    "injury", "injured", "illness", "ill", "sick",
+    "knee", "ankle", "foot", "hip", "shoulder", "back",
+    "wrist", "hand", "finger", "hamstring", "quad", "quadriceps",
+    "calf", "achilles", "concussion", "head", "neck", "groin",
+    "shin", "elbow", "toe", "thigh", "rib", "abdomen", "abdominal",
+    "soreness", "sore", "strain", "sprain", "fracture", "surgery",
+    "recovery", "non-covid illness", "covid", "health and safety",
+    "left leg", "right leg", "lower leg", "upper leg",
+})
+_EXCLUDE_KW = frozenset({
+    "coach's decision", "coaches decision", "coach decision",
+    "dnp - cd", "dnp-cd", "dnp cd",
+    "suspended", "suspension",
+    "trade", "waived",
+    "g league", "g-league",
+    "personal",
+    "rest",
+    "conditioning",
+    "load management",
+    "league excused",
+    "league",
+    "not injury",
+})
 
 
 def is_dnd_injury(reason: str) -> bool:
-    if not reason:
-        return True   # no reason given → count as DND
+    """
+    Return True ONLY if reason explicitly mentions an injury or illness.
+    Blank / vague / non-injury reasons → False.
+    """
+    if not reason or reason.strip().lower() in ("", "not provided"):
+        return False          # unknown reason → exclude
     low = reason.lower()
-    for kw in _NON_INJURY_KW:
+    for kw in _EXCLUDE_KW:
         if kw in low:
-            return False
+            return False      # explicitly non-injury
     for kw in _INJURY_KW:
         if kw in low:
-            return True
-    return False
+            return True       # explicit injury/illness mention
+    return False              # unrecognised reason → exclude
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +138,16 @@ def fetch_schedule() -> list[dict]:
 
     current = SEASON_START
     while current <= SEASON_END:
-        date_str = current.strftime("%Y%m%d")
-        data = _get(ESPN_SCOREBOARD, params={"dates": date_str, "limit": 50})
+        # date_str is the LOCAL calendar date — always use this as the game
+        # date, never event["date"] which is UTC and shifts west-coast games.
+        date_str = current.strftime("%Y-%m-%d")
+        query_str = current.strftime("%Y%m%d")
+        data = _get(ESPN_SCOREBOARD, params={"dates": query_str, "limit": 50})
         if data:
             for event in data.get("events", []):
                 eid = event.get("id", "")
                 if eid in seen:
-                    current += timedelta(days=1)
-                    continue
+                    continue          # already captured on a prior date query
                 seen.add(eid)
 
                 # Only completed games
@@ -146,7 +158,6 @@ def fetch_schedule() -> list[dict]:
                 )
                 if status_type not in ("STATUS_FINAL", "STATUS_FINAL_OT",
                                        "STATUS_FINAL_FORFEIT"):
-                    current += timedelta(days=1)
                     continue
 
                 competitions = event.get("competitions", [{}])
@@ -156,13 +167,12 @@ def fetch_schedule() -> list[dict]:
                 away = next((c for c in competitors if c.get("homeAway") == "away"), {})
 
                 games.append({
-                    "eventId":       eid,
-                    "gameDate":      event.get("shortName", date_str)[:10] if "-" in event.get("shortName","") else date_str,
-                    "gameDateFull":  event.get("date", "")[:10],
+                    "eventId":        eid,
+                    "gameDate":       date_str,   # local date from query — always correct
                     "homeTeamAbbrev": home.get("team", {}).get("abbreviation", ""),
                     "awayTeamAbbrev": away.get("team", {}).get("abbreviation", ""),
-                    "homeTeamName":  home.get("team", {}).get("displayName", ""),
-                    "awayTeamName":  away.get("team", {}).get("displayName", ""),
+                    "homeTeamName":   home.get("team", {}).get("displayName", ""),
+                    "awayTeamName":   away.get("team", {}).get("displayName", ""),
                 })
         current += timedelta(days=1)
         time.sleep(REQUEST_DELAY)
@@ -200,21 +210,19 @@ def fetch_dnd_players(event_id: str, game_date: str, matchup: str) -> list[dict]
                 player_name  = athlete.get("displayName", "")
                 player_id    = str(athlete.get("id", ""))
 
-                # Include if: explicitly flagged didNotPlay=True
-                # OR inactive + reason matches injury keywords
-                if did_not_play or (not active and is_dnd_injury(reason)):
-                    if is_dnd_injury(reason) or did_not_play:
-                        rows.append({
-                            "eventId":    event_id,
-                            "gameDate":   game_date,
-                            "matchup":    matchup,
-                            "playerName": player_name,
-                            "playerId":   player_id,
-                            "team":       team_abbrev,
-                            "status":     "DND" if did_not_play else "INACTIVE",
-                            "reason":     reason if reason else "Not provided",
-                            "source":     "ESPN_Boxscore",
-                        })
+                # Only include if the reason explicitly mentions injury/illness
+                if (did_not_play or not active) and is_dnd_injury(reason):
+                    rows.append({
+                        "eventId":    event_id,
+                        "gameDate":   game_date,
+                        "matchup":    matchup,
+                        "playerName": player_name,
+                        "playerId":   player_id,
+                        "team":       team_abbrev,
+                        "status":     "DND",
+                        "reason":     reason,
+                        "source":     "ESPN_Boxscore",
+                    })
 
     # ESPN injuries section (pre-game report, may have more detail)
     seen_ids = {r["playerId"] for r in rows}
@@ -314,7 +322,7 @@ def main() -> None:
         if eid in skip_ids:
             continue
 
-        gdate   = game["gameDateFull"] or game["gameDate"]
+        gdate   = game["gameDate"]
         matchup = f"{game['awayTeamAbbrev']} @ {game['homeTeamAbbrev']}"
         print(f"[{idx:>3}/{total}] {gdate}  {matchup}  (ESPN:{eid})")
 
