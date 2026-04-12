@@ -44,6 +44,8 @@ ESPN_SUMMARY = (
 
 # Regular-season date windows per year
 SEASON_DATES: dict[int, tuple[date, date]] = {
+    2022: (date(2022, 5,  6), date(2022, 9, 18)),
+    2023: (date(2023, 5, 19), date(2023, 9, 17)),
     2024: (date(2024, 5, 14), date(2024, 9, 19)),
     2025: (date(2025, 5, 16), date(2025, 9, 19)),
 }
