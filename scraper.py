@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
-WNBA 2024 Regular Season – DND (Did Not Dress) Injury / Illness Scraper
-========================================================================
-Fetches every 2024 WNBA regular-season game and records players listed
-as DND (Did Not Dress) due to injury or illness.
+WNBA Regular Season – DND (Did Not Dress) Injury / Illness Scraper
+====================================================================
+Fetches every regular-season game for a given WNBA season and records
+players listed as DND due to injury or illness.
 
-Data source: ESPN public API (no API key required, no bot blocking)
-  - Schedule:     site.api.espn.com  – all games May–Sep 2024
-  - Game summary: site.api.espn.com  – per-game boxscore with
-                  didNotPlay flag + reason for each player
+Data source: ESPN public API (no API key required)
 
-Output files (written to the current directory):
-    dnd_players_2024.json   – full detail, one record per player-game
-    dnd_players_2024.csv    – same data in CSV
+Output files:
+    dnd_players_{YEAR}.json
+    dnd_players_{YEAR}.csv
 
 Usage
 -----
-    python3 scraper.py                        # full season
-    python3 scraper.py --test                 # first 5 games only
-    python3 scraper.py --resume dnd_players_2024.json   # skip done games
+    python3 scraper.py                   # 2024 season (default)
+    python3 scraper.py --season 2025     # 2025 season
+    python3 scraper.py --test            # first 5 games only
+    python3 scraper.py --resume dnd_players_2025.json
 """
 
 from __future__ import annotations
@@ -44,9 +42,11 @@ ESPN_SUMMARY = (
     "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
 )
 
-# 2024 WNBA regular season window
-SEASON_START = date(2024, 5, 14)
-SEASON_END   = date(2024, 9, 19)
+# Regular-season date windows per year
+SEASON_DATES: dict[int, tuple[date, date]] = {
+    2024: (date(2024, 5, 14), date(2024, 9, 19)),
+    2025: (date(2025, 5, 16), date(2025, 9, 19)),
+}
 
 REQUEST_DELAY = 0.5   # seconds between requests
 
@@ -127,17 +127,18 @@ def _get(url: str, params: dict | None = None, retries: int = 4) -> dict | None:
 # ---------------------------------------------------------------------------
 # 1. Schedule via ESPN scoreboard (iterate day by day)
 # ---------------------------------------------------------------------------
-def fetch_schedule() -> list[dict]:
+def fetch_schedule(season_year: int = 2024) -> list[dict]:
     """
-    Fetch all completed 2024 WNBA regular-season games from ESPN.
-    Returns list of dicts: eventId, gameDate, homeTeam, awayTeam, status.
+    Fetch all completed WNBA regular-season games for *season_year* from ESPN.
+    Returns list of dicts: eventId, gameDate, homeTeam, awayTeam.
     """
-    print("Fetching 2024 WNBA schedule from ESPN …")
+    season_start, season_end = SEASON_DATES[season_year]
+    print(f"Fetching {season_year} WNBA schedule from ESPN …")
     games: list[dict] = []
     seen: set[str] = set()
 
-    current = SEASON_START
-    while current <= SEASON_END:
+    current = season_start
+    while current <= season_end:
         # date_str is the LOCAL calendar date — always use this as the game
         # date, never event["date"] which is UTC and shifts west-coast games.
         date_str = current.strftime("%Y-%m-%d")
@@ -285,15 +286,24 @@ def save_results(rows: list[dict], json_path: Path, csv_path: Path) -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Scrape WNBA 2024 DND injury/illness players (ESPN API)."
+        description="Scrape WNBA DND injury/illness players (ESPN API)."
     )
+    parser.add_argument("--season", type=int, default=2024,
+                        choices=sorted(SEASON_DATES.keys()),
+                        help="WNBA season year (default: 2024)")
     parser.add_argument("--test", action="store_true",
                         help="Process only the first 5 games (smoke test)")
     parser.add_argument("--resume", metavar="JSON_FILE",
                         help="Skip event IDs already in this output file")
-    parser.add_argument("--out-json", default="dnd_players_2024.json")
-    parser.add_argument("--out-csv",  default="dnd_players_2024.csv")
+    parser.add_argument("--out-json", default=None,
+                        help="Output JSON path (default: dnd_players_{YEAR}.json)")
+    parser.add_argument("--out-csv",  default=None,
+                        help="Output CSV path (default: dnd_players_{YEAR}.csv)")
     args = parser.parse_args()
+
+    yr = args.season
+    out_json = args.out_json or f"dnd_players_{yr}.json"
+    out_csv  = args.out_csv  or f"dnd_players_{yr}.csv"
 
     # Load resume data
     existing_rows: list[dict] = []
@@ -306,7 +316,7 @@ def main() -> None:
             skip_ids = {r["eventId"] for r in existing_rows}
             print(f"Resuming: {len(skip_ids)} games already processed.")
 
-    games = fetch_schedule()
+    games = fetch_schedule(yr)
     if not games:
         sys.exit("Could not retrieve schedule. Check your internet connection.")
 
@@ -334,7 +344,7 @@ def main() -> None:
         time.sleep(REQUEST_DELAY)
 
     print(f"\n{'='*60}")
-    save_results(all_rows, Path(args.out_json), Path(args.out_csv))
+    save_results(all_rows, Path(out_json), Path(out_csv))
 
 
 if __name__ == "__main__":

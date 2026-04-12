@@ -96,9 +96,11 @@ ESPN_ROSTER = (
     "teams/{team_id}/roster"
 )
 
-# Season date range (inclusive)
-SEASON_START = date(2024, 5, 14)
-SEASON_END   = date(2024, 9, 19)
+# Regular-season date windows per year
+SEASON_DATES: dict[int, tuple[date, date]] = {
+    2024: (date(2024, 5, 14), date(2024, 9, 19)),
+    2025: (date(2025, 5, 16), date(2025, 9, 19)),
+}
 
 RATE_LIMIT_DELAY = 0.5  # seconds between uncached requests
 
@@ -171,14 +173,16 @@ def parse_minutes(raw: str) -> int:
 # Schedule fetching
 # ---------------------------------------------------------------------------
 
-def fetch_schedule(cache_dir: Path, test_mode: bool = False) -> dict:
+def fetch_schedule(cache_dir: Path, test_mode: bool = False,
+                   season_year: int = 2024) -> dict:
     """
     Returns team_schedule: {team_abbrev: [sorted list of game dicts]}
     Each game dict: {eventId, date, homeTeam, awayTeam, isHome, arenaKey}
     """
+    season_start, season_end = SEASON_DATES[season_year]
     all_events = []
-    current = SEASON_START
-    while current <= SEASON_END:
+    current = season_start
+    while current <= season_end:
         url = ESPN_SCOREBOARD.format(date=current.strftime("%Y%m%d"))
         try:
             data = fetch_json(url, cache_dir)
@@ -192,21 +196,12 @@ def fetch_schedule(cache_dir: Path, test_mode: bool = False) -> dict:
                 event.get("status", {}).get("type", {}).get("name", "")
             )
             if status_type not in ("STATUS_FINAL", "STATUS_FINAL_OT"):
-                current += timedelta(days=1)
                 continue
 
             event_id = event.get("id", "")
-            event_date_str = event.get("date", "")
-            # ESPN date is ISO 8601 UTC; we care only about the calendar date
-            if event_date_str:
-                try:
-                    event_date = datetime.fromisoformat(
-                        event_date_str.replace("Z", "+00:00")
-                    ).date()
-                except ValueError:
-                    event_date = current
-            else:
-                event_date = current
+            # Use the query date (current) as the authoritative local game date.
+            # event["date"] is UTC and shifts late west-coast games to the next day.
+            event_date = current
 
             competitions = event.get("competitions", [])
             if not competitions:
@@ -702,8 +697,9 @@ def build_rows(
 
         injury_type = classify_injury(reason)
 
+        season_label = f"{injury_date.year}-{str(injury_date.year + 1)[2:]}"
         row = {
-            "Season": "2024-25",
+            "Season": season_label,
             "Game_ID": game_id,
             "Game_Date": injury_date,
             "Player": player_name,
@@ -768,11 +764,11 @@ COLUMNS = [
 ]
 
 
-def write_excel(rows: list, output_path: str) -> None:
+def write_excel(rows: list, output_path: str, season_year: int = 2024) -> None:
     """Write rows to an Excel file with formatted header."""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "WNBA Injuries 2024"
+    ws.title = f"WNBA Injuries {season_year}"
 
     # Header row
     header_font = Font(bold=True)
@@ -812,7 +808,12 @@ def write_excel(rows: list, output_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build WNBA 2024 injury context Excel from ESPN data."
+        description="Build WNBA injury context Excel from ESPN data."
+    )
+    parser.add_argument(
+        "--season", type=int, default=2024,
+        choices=sorted(SEASON_DATES.keys()),
+        help="WNBA season year (default: 2024)",
     )
     parser.add_argument(
         "--test",
@@ -821,8 +822,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default="wnba_injuries_2024.xlsx",
-        help="Output Excel filename (default: wnba_injuries_2024.xlsx).",
+        default=None,
+        help="Output Excel filename (default: wnba_injuries_{YEAR}.xlsx).",
     )
     parser.add_argument(
         "--cache",
@@ -831,11 +832,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    yr  = args.season
+    out = args.out or f"wnba_injuries_{yr}.xlsx"
+
     cache_dir = Path(args.cache)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print("[STEP 1] Fetching schedule...")
-    team_schedule, unique_events = fetch_schedule(cache_dir, test_mode=args.test)
+    print(f"[STEP 1] Fetching {yr} schedule...")
+    team_schedule, unique_events = fetch_schedule(
+        cache_dir, test_mode=args.test, season_year=yr
+    )
 
     print("[STEP 2] Fetching game boxscores...")
     player_log, dnd_list, player_info = fetch_game_logs(unique_events, cache_dir)
@@ -851,7 +857,7 @@ def main() -> None:
     )
 
     print("[STEP 4] Writing Excel...")
-    write_excel(rows, args.out)
+    write_excel(rows, out, season_year=yr)
 
     print("[DONE]")
 
